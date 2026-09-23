@@ -11,7 +11,7 @@ export async function GET(
       return NextResponse.json({ error: "Missing gift id" }, { status: 400 });
     }
 
-    const gift = getServerGift(id);
+    const gift = await getServerGift(id);
     if (!gift) {
       return NextResponse.json({ error: "Gift not found" }, { status: 404 });
     }

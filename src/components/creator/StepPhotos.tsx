@@ -26,6 +26,42 @@ interface StepPhotosProps {
   onNext: () => void;
 }
 
+async function compressImageFile(file: File, maxWidth = 800, quality = 0.72): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve("");
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => resolve((reader.result as string) || "");
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        if (width > maxWidth || height > maxWidth) {
+          if (width > height) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          } else {
+            width = Math.round((width * maxWidth) / height);
+            height = maxWidth;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve((reader.result as string) || "");
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export const StepPhotos: React.FC<StepPhotosProps> = ({
   photos,
   puzzlePhotoIndex,
@@ -37,31 +73,42 @@ export const StepPhotos: React.FC<StepPhotosProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
 
   const rotations = [-2.5, 2, -1.8, 2.5, -2, 1.5, -1.2, 2.2];
 
-  const handleFileUpload = (files: FileList | null) => {
+  const handleFileUpload = async (files: FileList | null) => {
     if (!files) return;
-    sound.playPop();
+    const imageFiles = Array.from(files).filter((file) =>
+      file.type.startsWith("image/")
+    );
+    if (imageFiles.length === 0) return;
 
-    Array.from(files).forEach((file) => {
-      if (!file.type.startsWith("image/")) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const url = e.target?.result as string;
-        if (url) {
-          onChangePhotos([
-            ...photos,
-            {
-              id: `custom-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
-              url,
-              caption: "A core memory with you ♡",
-            },
-          ]);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    sound.playPop();
+    setIsCompressing(true);
+
+    try {
+      const compressedUrls = await Promise.all(
+        imageFiles.map((file) => compressImageFile(file))
+      );
+
+      const newPhotos: FriendshipPhoto[] = compressedUrls
+        .filter((url) => Boolean(url))
+        .map((url) => ({
+          id: `custom-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          url,
+          caption: "A core memory with you ♡",
+        }));
+
+      if (newPhotos.length > 0) {
+        onChangePhotos([...photos, ...newPhotos]);
+      }
+    } finally {
+      setIsCompressing(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -139,13 +186,21 @@ export const StepPhotos: React.FC<StepPhotosProps> = ({
           onChange={(e) => handleFileUpload(e.target.files)}
         />
         <div className="w-12 h-12 rounded-2xl bg-[#FFF0F6] text-[#FF6B9D] flex items-center justify-center mx-auto mb-3 shadow-xs">
-          <Upload size={22} />
+          {isCompressing ? (
+            <RefreshCw size={22} className="animate-spin" />
+          ) : (
+            <Upload size={22} />
+          )}
         </div>
         <p className="text-sm font-bold text-[#292536] mb-1">
-          Click or drop photos here
+          {isCompressing
+            ? "Optimizing photos for seamless sharing..."
+            : "Click or drop photos here"}
         </p>
         <p className="text-xs text-[#777183]">
-          JPG, PNG, WebP up to 10MB each
+          {isCompressing
+            ? "Compressing lightly to ensure fast link loading ✨"
+            : "JPG, PNG, WebP up to 10MB each"}
         </p>
       </div>
 

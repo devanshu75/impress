@@ -30,16 +30,27 @@ interface StepPreviewProps {
 export const StepPreview: React.FC<StepPreviewProps> = ({ gift }) => {
   const [copied, setCopied] = useState(false);
   const [shortUrl, setShortUrl] = useState<string>("");
-  const [useTinyUrl, setUseTinyUrl] = useState(true);
+  const [useTinyUrl, setUseTinyUrl] = useState(false);
+  const [cloudId, setCloudId] = useState<string | null>(null);
 
-  // Direct short link: origin/m/id (clean & ~35 chars)
+  // Direct resilient link: origin/m/id with embedded data parameter if compact
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const directUrl = encodeGiftToShareUrl(gift, origin);
+  const directUrl = encodeGiftToShareUrl(gift, origin, cloudId || undefined);
 
-  // Auto-sync gift to server on mount so it's accessible across devices
+  // Auto-sync gift to server and persistent cloud storage
   useEffect(() => {
     saveGift(gift);
-    saveGiftRemote(gift);
+    let isCancelled = false;
+
+    saveGiftRemote(gift).then((res) => {
+      if (!isCancelled && res.cloudKey) {
+        setCloudId(res.cloudKey);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
   }, [gift]);
 
   // Try to generate an ultra-compact TinyURL if public origin is present
@@ -60,7 +71,7 @@ export const StepPreview: React.FC<StepPreviewProps> = ({ gift }) => {
     };
   }, [directUrl, origin]);
 
-  // Active share URL (TinyURL if available & toggled, otherwise direct clean short URL)
+  // Active share URL (TinyURL if available & explicitly toggled, otherwise direct clean URL)
   const activeShareUrl = (useTinyUrl && shortUrl) ? shortUrl : directUrl;
 
   const handleCopyLink = async () => {
@@ -219,7 +230,7 @@ export const StepPreview: React.FC<StepPreviewProps> = ({ gift }) => {
       {/* Preview as Friend CTA */}
       <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
         <Link
-          href={`/m/${gift.id}`}
+          href={directUrl}
           onClick={() => {
             sound.playChime();
             saveGift(gift);

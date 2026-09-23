@@ -34,13 +34,45 @@ function ensureInitialized() {
   }
 }
 
-export function getServerGift(id: string): FriendshipGift | null {
+export async function getServerGift(id: string): Promise<FriendshipGift | null> {
   ensureInitialized();
   if (id === "demo") return DEMO_GIFT;
-  return memoryCache.get(id) || null;
+  if (memoryCache.has(id)) return memoryCache.get(id)!;
+
+  // Try fetching from Bytebin persistent cloud storage
+  try {
+    const res = await fetch(`https://bytebin.lucko.me/${encodeURIComponent(id)}`, {
+      headers: { "User-Agent": "amiverse-gift-sync" },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && (data.recipientName || data.creatorName)) {
+        memoryCache.set(id, data as FriendshipGift);
+        return data as FriendshipGift;
+      }
+    }
+  } catch (err) {
+    // Pastes.dev fallback
+    try {
+      const res = await fetch(`https://api.pastes.dev/${encodeURIComponent(id)}`, {
+        headers: { "User-Agent": "amiverse-gift-sync" },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && (data.recipientName || data.creatorName)) {
+          memoryCache.set(id, data as FriendshipGift);
+          return data as FriendshipGift;
+        }
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
-export function saveServerGift(gift: FriendshipGift): void {
+export async function saveServerGift(gift: FriendshipGift): Promise<string | null> {
   ensureInitialized();
   memoryCache.set(gift.id, gift);
 
@@ -54,6 +86,30 @@ export function saveServerGift(gift: FriendshipGift): void {
     }
     fs.writeFileSync(GIFTS_FILE, JSON.stringify(record, null, 2), "utf-8");
   } catch (err) {
-    console.error("[serverGifts] Save error:", err);
+    // Might fail in read-only / serverless container filesystems
   }
+
+  // Sync to Bytebin persistent cloud storage
+  try {
+    const res = await fetch("https://bytebin.lucko.me/post", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "amiverse-gift-sync",
+      },
+      body: JSON.stringify(gift),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.key) {
+        memoryCache.set(data.key, gift);
+        return data.key;
+      }
+    }
+  } catch (err) {
+    console.warn("[serverGifts] Bytebin sync error:", err);
+  }
+
+  return null;
 }
+

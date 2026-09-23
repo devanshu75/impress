@@ -1,4 +1,5 @@
 import { FriendshipGift, DEFAULT_RULES } from "./types";
+import LZString from "lz-string";
 
 export const SAMPLE_PHOTOS = [
   {
@@ -99,39 +100,177 @@ export function clearCreatorDraft(): void {
   localStorage.removeItem(STORAGE_KEY_DRAFT);
 }
 
-/**
- * Generate a clean, short shareable URL for the gift
- */
-export function encodeGiftToShareUrl(gift: FriendshipGift, origin: string): string {
-  const base = origin ? origin.replace(/\/$/, "") : "";
-  return `${base}/m/${gift.id}`;
+export function giftToCompact(gift: FriendshipGift) {
+  return {
+    i: gift.id,
+    c: gift.creatorName,
+    r: gift.recipientName,
+    d: gift.friendshipDate,
+    m: gift.howWeMet,
+    v: gift.vibe,
+    w: gift.whyTheyMatter,
+    p: gift.photos,
+    pd: gift.puzzleDifficulty,
+    pi: gift.puzzlePhotoIndex ?? 0,
+    si: gift.scratchPhotoIndex ?? 1,
+    l: gift.letter,
+    rl: gift.rules,
+    ca: gift.createdAt,
+  };
 }
 
-export async function saveGiftRemote(gift: FriendshipGift): Promise<boolean> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function compactToGift(compact: any): FriendshipGift {
+  return {
+    id: compact.i || `gift-${Date.now().toString(36)}`,
+    creatorName: compact.c || "",
+    recipientName: compact.r || "",
+    friendshipDate: compact.d || "",
+    howWeMet: compact.m || "",
+    vibe: compact.v || "chaos-duo",
+    whyTheyMatter: compact.w || "",
+    photos: Array.isArray(compact.p) ? compact.p : [],
+    puzzleDifficulty: compact.pd || "easy",
+    puzzlePhotoIndex: compact.pi ?? 0,
+    scratchPhotoIndex: compact.si ?? 1,
+    letter: compact.l || "",
+    rules: Array.isArray(compact.rl) ? compact.rl : DEFAULT_RULES,
+    createdAt: compact.ca || new Date().toISOString(),
+  };
+}
+
+export function compressGiftToParam(gift: FriendshipGift): string {
+  try {
+    const compact = giftToCompact(gift);
+    const jsonStr = JSON.stringify(compact);
+    return LZString.compressToEncodedURIComponent(jsonStr);
+  } catch (err) {
+    console.warn("Failed to compress gift:", err);
+    return "";
+  }
+}
+
+/**
+ * Generate a clean, resilient shareable URL for the gift.
+ * If the payload is reasonably compact (< 2500 chars), embeds ?d= so the recipient
+ * can instantly load the exact custom data with 0ms network latency and 100% offline reliability.
+ */
+export function encodeGiftToShareUrl(gift: FriendshipGift, origin: string, cloudId?: string): string {
+  const base = origin ? origin.replace(/\/$/, "") : "";
+  const idToUse = cloudId || gift.id;
+  const compressed = compressGiftToParam(gift);
+
+  // If compressed data fits safely within standard URL length limits (< 2500 chars),
+  // include ?d= so the recipient can load the entire museum with 0ms network latency.
+  if (compressed && compressed.length < 2500) {
+    return `${base}/m/${idToUse}?d=${compressed}`;
+  }
+
+  // If large (e.g. lots of custom photos), rely on persistent ID
+  return `${base}/m/${idToUse}`;
+}
+
+export async function saveGiftRemote(gift: FriendshipGift): Promise<{ success: boolean; cloudKey?: string }> {
   saveGift(gift);
+
+  let cloudKey: string | undefined = undefined;
+
+  // 1. POST to /api/gifts
   try {
     const res = await fetch("/api/gifts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ gift }),
     });
-    return res.ok;
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.cloudKey) {
+        cloudKey = data.cloudKey;
+      }
+    }
   } catch (err) {
-    console.warn("Could not sync gift to server:", err);
-    return false;
+    console.warn("Could not sync gift to /api/gifts:", err);
   }
+
+  // 2. Client fallback direct upload to Bytebin if cloudKey wasn't returned
+  if (!cloudKey) {
+    try {
+      const res = await fetch("https://bytebin.lucko.me/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": "amiverse-gift-sync" },
+        body: JSON.stringify(gift),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.key) {
+          cloudKey = data.key;
+        }
+      }
+    } catch {
+      // Pastes.dev secondary fallback
+      try {
+        const res = await fetch("https://api.pastes.dev/post", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "User-Agent": "amiverse-gift-sync" },
+          body: JSON.stringify(gift),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.key) {
+            cloudKey = data.key;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  if (cloudKey) {
+    // Also save in localStorage under the cloudKey so creator has it under both keys
+    saveGift({ ...gift, id: cloudKey });
+  }
+
+  return { success: true, cloudKey };
 }
 
 export async function fetchRemoteGift(id: string): Promise<FriendshipGift | null> {
+  // 1. Try local server API
   try {
     const res = await fetch(`/api/gifts/${encodeURIComponent(id)}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data?.gift || null;
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.gift) return data.gift;
+    }
   } catch (err) {
-    console.warn("Could not fetch gift from server:", err);
-    return null;
+    console.warn("Could not fetch gift from /api/gifts:", err);
   }
+
+  // 2. Fallback: try Bytebin directly
+  try {
+    const res = await fetch(`https://bytebin.lucko.me/${encodeURIComponent(id)}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && (data.recipientName || data.creatorName || data.r || data.c)) {
+        return data.recipientName ? data : compactToGift(data);
+      }
+    }
+  } catch {}
+
+  // 3. Fallback: try Pastes.dev directly
+  try {
+    const res = await fetch(`https://api.pastes.dev/${encodeURIComponent(id)}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && (data.recipientName || data.creatorName || data.r || data.c)) {
+        return data.recipientName ? data : compactToGift(data);
+      }
+    }
+  } catch {}
+
+  return null;
 }
 
 export async function shortenUrl(url: string): Promise<string> {
@@ -150,27 +289,52 @@ export async function shortenUrl(url: string): Promise<string> {
 }
 
 export function decodeGiftFromShareParam(dataParam: string): FriendshipGift | null {
+  if (!dataParam) return null;
+
+  // 1. Try LZString decompression
+  try {
+    const lzDecoded = LZString.decompressFromEncodedURIComponent(dataParam);
+    if (lzDecoded) {
+      const parsed = JSON.parse(lzDecoded);
+      if (parsed && (parsed.r !== undefined || parsed.c !== undefined || parsed.i !== undefined)) {
+        return compactToGift(parsed);
+      }
+    }
+  } catch {}
+
+  // 2. Try URI-decoded LZString (if double encoded)
+  try {
+    const unescaped = decodeURIComponent(dataParam);
+    const lzDecoded = LZString.decompressFromEncodedURIComponent(unescaped);
+    if (lzDecoded) {
+      const parsed = JSON.parse(lzDecoded);
+      if (parsed && (parsed.r !== undefined || parsed.c !== undefined || parsed.i !== undefined)) {
+        return compactToGift(parsed);
+      }
+    }
+  } catch {}
+
+  // 3. Try legacy base64 json (decodeURIComponent + atob)
   try {
     const jsonStr = decodeURIComponent(atob(dataParam));
     const compact = JSON.parse(jsonStr);
-    return {
-      id: compact.i,
-      creatorName: compact.c,
-      recipientName: compact.r,
-      friendshipDate: compact.d,
-      howWeMet: compact.m,
-      vibe: compact.v,
-      whyTheyMatter: compact.w,
-      photos: compact.p || [],
-      puzzleDifficulty: compact.pd || "easy",
-      puzzlePhotoIndex: compact.pi ?? 0,
-      scratchPhotoIndex: compact.si ?? 1,
-      letter: compact.l,
-      rules: compact.rl || DEFAULT_RULES,
-      createdAt: new Date().toISOString(),
-    };
-  } catch (e) {
-    console.warn("Could not decode share data param", e);
-    return null;
-  }
+    return compactToGift(compact);
+  } catch {}
+
+  // 4. Try raw atob base64
+  try {
+    const cleanB64 = dataParam.replace(/-/g, "+").replace(/_/g, "/");
+    const jsonStr = atob(cleanB64);
+    const compact = JSON.parse(jsonStr);
+    return compactToGift(compact);
+  } catch {}
+
+  // 5. Try direct JSON parse
+  try {
+    const parsed = JSON.parse(dataParam);
+    return compactToGift(parsed);
+  } catch {}
+
+  return null;
 }
+

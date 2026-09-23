@@ -14,8 +14,8 @@ export async function POST(request: Request) {
       );
     }
 
-    saveServerGift(gift);
-    return NextResponse.json({ success: true, id: gift.id });
+    const cloudKey = await saveServerGift(gift);
+    return NextResponse.json({ success: true, id: gift.id, cloudKey });
   } catch (error) {
     console.error("[api/gifts POST] Error:", error);
     return NextResponse.json(
